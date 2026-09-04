@@ -8,6 +8,7 @@ const router = Router();
 
 const MAX_DISPLAY_NAME_LENGTH = 80;
 const MAX_CONTACTS_PER_REQUEST = 500;
+const MAX_PUSH_TOKEN_LENGTH = 512;
 
 const USER_SELECT = {
   id: true,
@@ -52,6 +53,28 @@ function normalizeDisplayName(value: unknown): string | null {
   }
 
   return name;
+}
+
+function normalizePushToken(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const token = value.trim();
+
+  if (!token || token.length > MAX_PUSH_TOKEN_LENGTH) {
+    return null;
+  }
+
+  if (!token.startsWith("ExponentPushToken[")) {
+    return null;
+  }
+
+  if (!token.endsWith("]")) {
+    return null;
+  }
+
+  return token;
 }
 
 /**
@@ -153,7 +176,54 @@ router.patch("/me", requireAuth, async (req, res) => {
     );
 
     return res.status(500).json({
-      message: "Could not update user profile",
+      message: "Could not update profile",
+    });
+  }
+});
+
+/**
+ * Register or update the authenticated user's
+ * Expo push notification token.
+ *
+ * POST /api/users/me/push-token
+ */
+router.post("/me/push-token", requireAuth, async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        message: "Authentication required",
+      });
+    }
+
+    const pushToken = normalizePushToken(req.body?.pushToken);
+
+    if (!pushToken) {
+      return res.status(400).json({
+        message: "A valid push token is required",
+      });
+    }
+
+    await prisma.user.update({
+      where: {
+        id: req.user.id,
+      },
+      data: {
+        pushToken,
+        lastSeenAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({
+      message: "Push notification token registered",
+    });
+  } catch (error) {
+    console.error(
+      "Register push token error:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+
+    return res.status(500).json({
+      message: "Could not register push notification token",
     });
   }
 });
@@ -162,10 +232,6 @@ router.patch("/me", requireAuth, async (req, res) => {
  * Match local contacts against PandaMeet accounts.
  *
  * The request may contain up to 500 phone numbers.
- *
- * Matched users intentionally do NOT receive their
- * stored phone numbers in the response. The requesting
- * device already knows the contact number it supplied.
  *
  * POST /api/users/match-contacts
  */

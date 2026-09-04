@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request } from "express";
 import type { Server } from "socket.io";
-
+import { sendIncomingCallPush } from "../lib/push";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middleware/auth";
 
@@ -33,6 +33,7 @@ const CALL_SELECT = {
       id: true,
       displayName: true,
       lastSeenAt: true,
+      pushToken: true,
     },
   },
 } as const;
@@ -369,6 +370,13 @@ router.post("/", requireAuth, async (req, res) => {
       callerId: result.call.callerId,
       callerName: result.call.caller.displayName,
       status: result.call.status,
+    });
+
+    void sendIncomingCallPush(result.call.receiver.pushToken, {
+      type: "incoming-call",
+      callId: result.call.id,
+      callerId: result.call.callerId,
+      callerName: result.call.caller.displayName,
     });
 
     return res.status(201).json({

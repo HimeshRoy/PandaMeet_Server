@@ -21,6 +21,7 @@ model User {
   googleEmail           String?
 
   displayName           String
+  pushToken             String?
 
   lastSeenAt            DateTime?
   createdAt             DateTime                @default(now())
