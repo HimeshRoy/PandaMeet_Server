@@ -98,32 +98,33 @@ function getGoogleDisplayName(googleDisplayName: string | null): string {
 }
 
 /**
- * Google + SIM authentication.
+ * Google authentication with a PandaMeet phone number.
  *
  * Authentication flow:
  *
- * 1. Mobile app verifies the entered Indian phone number
- *    against the device SIM.
+ * 1. Mobile app collects the user's Indian phone number.
  *
  * 2. Mobile app completes Google Sign-In.
  *
- * 3. Mobile app sends the Google ID token, phone number,
- *    and SIM verification result to this endpoint.
+ * 3. Mobile app sends the Google ID token and phone number
+ *    to this endpoint.
  *
  * 4. Server independently verifies the Google ID token.
  *
- * 5. Server creates or retrieves the PandaMeet account.
+ * 5. The Google account and phone number must belong to
+ *    the same PandaMeet account.
  *
- * 6. Server creates a secure session.
+ * 6. Server creates or retrieves the PandaMeet account.
+ *
+ * 7. Server creates a secure session.
  *
  * Important:
- * The server cannot directly inspect the device SIM.
- * Therefore simVerified is a client-side attestation.
- * It is not carrier-level cryptographic proof.
+ * The phone number identifies the PandaMeet account but is
+ * not independently verified by SMS or SIM in this flow.
  */
 router.post("/google", async (req, res) => {
   try {
-    const { idToken, phoneNumber, displayName, simVerified } = req.body ?? {};
+    const { idToken, phoneNumber, displayName } = req.body ?? {};
 
     /*
      * Validate Google ID token input.
@@ -148,22 +149,6 @@ router.post("/google", async (req, res) => {
     if (!normalizedPhone) {
       return res.status(400).json({
         message: "Please enter a valid Indian phone number",
-      });
-    }
-
-    /*
-     * The Android application performs the SIM check
-     * before calling this endpoint.
-     *
-     * The server cannot independently access the device
-     * SIM, so this value is a client-side attestation.
-     *
-     * This is intentionally NOT described as
-     * carrier-level ownership proof.
-     */
-    if (simVerified !== true) {
-      return res.status(403).json({
-        message: "SIM verification is required before Google sign-in",
       });
     }
 
@@ -202,8 +187,10 @@ router.post("/google", async (req, res) => {
       }
 
       /*
-       * Keep the existing verification method when it
-       * already exists, otherwise upgrade NONE -> SIM.
+       * Update Google profile information and last-seen time.
+       *
+       * Phone verification is intentionally not changed here.
+       * This authentication flow does not verify phone ownership.
        */
       const updatedUser = await prisma.user.update({
         where: {
@@ -211,14 +198,6 @@ router.post("/google", async (req, res) => {
         },
         data: {
           googleEmail: googleUser.email ?? existingGoogleUser.googleEmail,
-
-          phoneVerification:
-            existingGoogleUser.phoneVerification === "NONE"
-              ? "SIM"
-              : existingGoogleUser.phoneVerification,
-
-          phoneVerifiedAt: existingGoogleUser.phoneVerifiedAt ?? new Date(),
-
           lastSeenAt: new Date(),
         },
         select: USER_SELECT,
@@ -280,14 +259,18 @@ router.post("/google", async (req, res) => {
 
     /*
      * Create the PandaMeet account.
+     *
+     * Phone verification remains NONE because this
+     * authentication flow does not verify ownership of
+     * the phone number through SIM or SMS.
      */
     const user = await prisma.user.create({
       data: {
         phoneNumber: normalizedPhone,
 
-        phoneVerification: "SIM",
+        phoneVerification: "NONE",
 
-        phoneVerifiedAt: new Date(),
+        phoneVerifiedAt: null,
 
         googleAccountId: googleUser.googleAccountId,
 
