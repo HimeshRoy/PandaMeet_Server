@@ -724,6 +724,11 @@ router.post("/:id/end", requireAuth, async (req, res) => {
       },
     });
 
+    console.log("PandaMeet accept lookup:", {
+      callId,
+      found: Boolean(call),
+    });
+
     if (!call) {
       return res.status(404).json({
         message: "Call not found",
