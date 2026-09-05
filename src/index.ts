@@ -317,12 +317,14 @@ io.use(async (socket, next) => {
       !sessionToken.trim() ||
       sessionToken.length > 512
     ) {
+      console.warn("PandaMeet socket authentication rejected");
       return next(new Error("Authentication required"));
     }
 
     const user = await authenticateSocket(sessionToken);
 
     if (!user) {
+     console.warn("PandaMeet socket session invalid");
       return next(new Error("Invalid session"));
     }
 
@@ -341,6 +343,7 @@ io.use(async (socket, next) => {
 });
 
 io.on("connection", (socket) => {
+  console.log("PandaMeet socket client connected");
   const user = socket.data.user;
 
   /*
