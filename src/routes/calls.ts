@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request } from "express";
 import type { Server } from "socket.io";
+
 import { sendIncomingCallPush } from "../lib/push";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middleware/auth";
@@ -70,14 +71,9 @@ function emitToUser(
 
 /**
  * Convert one expired ringing call into MISSED.
- *
- * The conditional update makes this safe if another
- * request or the background expiry scheduler tries
- * to expire the same call at the same time.
  */
 async function markCallMissedIfExpired(callId: string): Promise<boolean> {
   const cutoff = new Date(Date.now() - RING_TIMEOUT_MS);
-
   const now = new Date();
 
   const result = await prisma.call.updateMany({
@@ -125,13 +121,7 @@ async function markCallMissedIfExpired(callId: string): Promise<boolean> {
 }
 
 /**
- * Automatically expire ringing calls.
- *
- * This runs independently of API requests so a call
- * that nobody touches still becomes MISSED after
- * the 30-second ringing period.
- *
- * No call data or user data is logged.
+ * Automatically expire ringing calls after 30 seconds.
  */
 let expiryJobRunning = false;
 
@@ -162,10 +152,6 @@ async function expireRingingCalls(): Promise<void> {
         createdAt: "asc",
       },
     });
-
-    if (expiredCalls.length === 0) {
-      return;
-    }
 
     for (const call of expiredCalls) {
       const result = await prisma.call.updateMany({
@@ -218,7 +204,6 @@ callExpiryTimer.unref?.();
 router.post("/", requireAuth, async (req, res) => {
   try {
     const callerId = getUserId(req);
-
     const receiverId = req.body?.receiverId;
 
     if (typeof receiverId !== "string" || !receiverId.trim()) {
@@ -252,24 +237,15 @@ router.post("/", requireAuth, async (req, res) => {
       });
     }
 
-    /*
-     * PostgreSQL advisory transaction lock.
-     *
-     * Both directions of the same user pair produce
-     * the same lock key, preventing concurrent calls
-     * such as A -> B and B -> A from both creating
-     * active calls.
-     */
     const userIds = [callerId, normalizedReceiverId].sort();
-
     const lockKey = `${userIds[0]}:${userIds[1]}`;
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
-          SELECT pg_advisory_xact_lock(
-            hashtext(${lockKey})
-          )
-        `;
+        SELECT pg_advisory_xact_lock(
+          hashtext(${lockKey})
+        )
+      `;
 
       const activeCalls = await tx.call.findMany({
         where: {
@@ -403,7 +379,6 @@ router.post("/", requireAuth, async (req, res) => {
 router.get("/:id", requireAuth, async (req, res) => {
   try {
     const userId = getUserId(req);
-
     const callId = getCallId(req);
 
     if (!callId) {
@@ -498,7 +473,6 @@ router.get("/", requireAuth, async (req, res) => {
 router.post("/:id/accept", requireAuth, async (req, res) => {
   try {
     const userId = getUserId(req);
-
     const callId = getCallId(req);
 
     if (!callId) {
@@ -507,8 +481,12 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
       });
     }
 
-    await markCallMissedIfExpired(callId);
-
+    /*
+     * Do not silently turn the call into MISSED
+     * after the receiver has explicitly pressed Accept.
+     *
+     * We check the call directly first.
+     */
     const call = await prisma.call.findUnique({
       where: {
         id: callId,
@@ -518,7 +496,14 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
         callerId: true,
         receiverId: true,
         status: true,
+        createdAt: true,
       },
+    });
+
+    console.log("PandaMeet accept request:", {
+      callId,
+      found: Boolean(call),
+      status: call?.status ?? null,
     });
 
     if (!call) {
@@ -533,6 +518,40 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
       });
     }
 
+    /*
+     * If the call has naturally expired, mark it missed
+     * and tell the receiver that it can no longer be accepted.
+     */
+    const cutoff = new Date(Date.now() - RING_TIMEOUT_MS);
+
+    if (call.status === "RINGING" && call.createdAt <= cutoff) {
+      const expiredResult = await prisma.call.updateMany({
+        where: {
+          id: callId,
+          receiverId: userId,
+          status: "RINGING",
+        },
+        data: {
+          status: "MISSED",
+          endedAt: new Date(),
+        },
+      });
+
+      if (expiredResult.count === 1) {
+        emitToUser(call.callerId, "call-missed", {
+          callId: call.id,
+        });
+
+        emitToUser(call.receiverId, "call-missed", {
+          callId: call.id,
+        });
+      }
+
+      return res.status(409).json({
+        message: "This call is no longer ringing",
+      });
+    }
+
     if (call.status !== "RINGING") {
       return res.status(409).json({
         message: "This call is no longer ringing",
@@ -541,6 +560,10 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
 
     const now = new Date();
 
+    /*
+     * Only the receiver of this exact call can accept it,
+     * and only while it is still RINGING.
+     */
     const result = await prisma.call.updateMany({
       where: {
         id: callId,
@@ -568,11 +591,22 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
     });
 
     if (!updatedCall) {
-      return res.status(404).json({
-        message: "Call not found",
+      /*
+       * This should never happen because the row was
+       * successfully updated immediately before this lookup.
+       */
+      console.error("Accept call: updated call could not be reloaded", {
+        callId,
+      });
+
+      return res.status(500).json({
+        message: "Could not load accepted call",
       });
     }
 
+    /*
+     * Tell the caller that the receiver accepted.
+     */
     emitToUser(call.callerId, "call-accepted", {
       callId: call.id,
     });
@@ -601,7 +635,6 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
 router.post("/:id/reject", requireAuth, async (req, res) => {
   try {
     const userId = getUserId(req);
-
     const callId = getCallId(req);
 
     if (!callId) {
@@ -668,8 +701,8 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
     });
 
     if (!updatedCall) {
-      return res.status(404).json({
-        message: "Call not found",
+      return res.status(500).json({
+        message: "Could not load rejected call",
       });
     }
 
@@ -701,7 +734,6 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
 router.post("/:id/end", requireAuth, async (req, res) => {
   try {
     const userId = getUserId(req);
-
     const callId = getCallId(req);
 
     if (!callId) {
@@ -722,11 +754,6 @@ router.post("/:id/end", requireAuth, async (req, res) => {
         receiverId: true,
         status: true,
       },
-    });
-
-    console.log("PandaMeet accept lookup:", {
-      callId,
-      found: Boolean(call),
     });
 
     if (!call) {
@@ -786,8 +813,8 @@ router.post("/:id/end", requireAuth, async (req, res) => {
     });
 
     if (!updatedCall) {
-      return res.status(404).json({
-        message: "Call not found",
+      return res.status(500).json({
+        message: "Could not load ended call",
       });
     }
 
