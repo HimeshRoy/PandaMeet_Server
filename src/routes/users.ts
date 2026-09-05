@@ -197,6 +197,8 @@ router.post("/me/push-token", requireAuth, async (req, res) => {
 
     const pushToken = normalizePushToken(req.body?.pushToken);
 
+    console.log("PandaMeet push token received:", Boolean(pushToken));
+
     if (!pushToken) {
       return res.status(400).json({
         message: "A valid push token is required",
